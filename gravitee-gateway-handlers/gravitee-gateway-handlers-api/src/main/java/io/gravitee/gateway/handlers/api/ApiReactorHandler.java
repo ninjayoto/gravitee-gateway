@@ -51,12 +51,16 @@ import io.gravitee.gateway.policy.PolicyChainResolver;
 import io.gravitee.gateway.policy.PolicyManager;
 import io.gravitee.gateway.reactor.Reactable;
 import io.gravitee.gateway.reactor.handler.AbstractReactorHandler;
+import io.gravitee.gateway.reactor.handler.alert.AlertHandler;
 import io.gravitee.gateway.resource.ResourceLifecycleManager;
 import io.gravitee.gateway.security.core.SecurityPolicyChainResolver;
+import io.gravitee.node.api.Node;
+import io.gravitee.plugin.alert.AlertEngineService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -89,6 +93,13 @@ public class ApiReactorHandler extends AbstractReactorHandler implements Templat
     @Autowired
     private ExecutionContextFactory executionContextFactory;
 
+    @Autowired
+    private AlertEngineService alertEngineService;
+    @Autowired
+    private Node node;
+    @Value("${http.port:8082}")
+    private String port;
+
     @Override
     protected void doHandle(Request serverRequest, Response serverResponse, Handler<Response> handler) {
         // Pause the request and resume it as soon as all the stream are plugged and we have processed the HEAD part
@@ -100,7 +111,7 @@ public class ApiReactorHandler extends AbstractReactorHandler implements Templat
         }
 
         // Prepare request execution context
-        ExecutionContext executionContext = executionContextFactory.create(serverRequest, serverResponse);
+        final ExecutionContext executionContext = executionContextFactory.create(serverRequest, serverResponse);
         executionContext.setAttribute(ExecutionContext.ATTR_CONTEXT_PATH, serverRequest.contextPath());
         executionContext.setAttribute(ExecutionContext.ATTR_API, api.getId());
         executionContext.setAttribute(ExecutionContext.ATTR_INVOKER, invoker);
@@ -218,6 +229,10 @@ public class ApiReactorHandler extends AbstractReactorHandler implements Templat
 
         // Resume response read
         proxyResponse.resume();
+
+        final AlertHandler alertHandler = new AlertHandler(alertEngineService, context.getRequest(),
+                context.getContext(), node, port, handler);
+        alertHandler.handle(context.getResponse());
     }
 
     private void handleError(ProcessorContext context, ProcessorFailure failure, Handler<Response> handler) {

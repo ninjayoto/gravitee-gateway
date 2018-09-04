@@ -15,8 +15,10 @@
  */
 package io.gravitee.gateway.services.healthcheck.http;
 
+import io.gravitee.alert.api.event.Event;
 import io.gravitee.common.http.HttpHeaders;
 import io.gravitee.common.http.HttpStatusCode;
+import io.gravitee.common.utils.UUID;
 import io.gravitee.definition.model.HttpClientSslOptions;
 import io.gravitee.definition.model.HttpProxy;
 import io.gravitee.definition.model.endpoint.HttpEndpoint;
@@ -26,11 +28,14 @@ import io.gravitee.definition.model.ssl.pem.PEMKeyStore;
 import io.gravitee.definition.model.ssl.pem.PEMTrustStore;
 import io.gravitee.definition.model.ssl.pkcs12.PKCS12KeyStore;
 import io.gravitee.definition.model.ssl.pkcs12.PKCS12TrustStore;
+import io.gravitee.gateway.env.GatewayConfiguration;
 import io.gravitee.gateway.services.healthcheck.EndpointRule;
 import io.gravitee.gateway.services.healthcheck.EndpointStatusDecorator;
 import io.gravitee.gateway.services.healthcheck.eval.EvaluationException;
 import io.gravitee.gateway.services.healthcheck.eval.assertion.AssertionEvaluation;
 import io.gravitee.gateway.services.healthcheck.http.el.EvaluableHttpResponse;
+import io.gravitee.node.api.Node;
+import io.gravitee.plugin.alert.AlertEngineService;
 import io.gravitee.reporter.api.common.Request;
 import io.gravitee.reporter.api.common.Response;
 import io.gravitee.reporter.api.health.EndpointStatus;
@@ -52,6 +57,8 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.regex.Pattern;
 
+import static java.lang.System.currentTimeMillis;
+
 /**
  * @author David BRASSELY (david.brassely at graviteesource.com)
  * @author Azize ELAMRANI (azize.elamrani at graviteesource.com)
@@ -63,16 +70,17 @@ public class HttpEndpointRuleHandler implements Handler<Long> {
 
     // Pattern reuse for duplicate slash removal
     private static final Pattern DUPLICATE_SLASH_REMOVER = Pattern.compile("(?<!(http:|https:))[//]+");
-
     private static final String HTTPS_SCHEME = "https";
 
     private final EndpointRule rule;
-
     private final Vertx vertx;
-
     private final EndpointStatusDecorator endpointStatus;
-
     private Handler<EndpointStatus> statusHandler;
+
+    private AlertEngineService alertEngineService;
+    private GatewayConfiguration gatewayConfiguration;
+    private Node node;
+    private String port;
 
     public HttpEndpointRuleHandler(Vertx vertx, EndpointRule rule) {
         this.vertx = vertx;
@@ -86,7 +94,7 @@ public class HttpEndpointRuleHandler implements Handler<Long> {
 
         if (request.isFromRoot()) {
             try {
-                targetURI = new URI(targetURI.getScheme(), targetURI.getAuthority(), null, null , null);
+                targetURI = new URI(targetURI.getScheme(), targetURI.getAuthority(), null, null, null);
             } catch (URISyntaxException ex) {
                 logger.error("Unexpected error while creating healthcheck request from target[{}]", target, ex);
             }
@@ -288,16 +296,16 @@ public class HttpEndpointRuleHandler implements Handler<Long> {
 
                 final EndpointStatus.Builder healthBuilder = EndpointStatus
                         .forEndpoint(rule.api(), endpoint.getName())
-                        .on(System.currentTimeMillis());
+                        .on(currentTimeMillis());
 
-                long startTime = System.currentTimeMillis();
+                long startTime = currentTimeMillis();
 
                 Request request = new Request();
                 request.setMethod(step.getRequest().getMethod());
                 request.setUri(hcRequestUri.toString());
 
                 healthRequest.handler(response -> response.bodyHandler(buffer -> {
-                    long endTime = System.currentTimeMillis();
+                    long endTime = currentTimeMillis();
                     logger.debug("Health-check endpoint returns a response with a {} status code", response.statusCode());
 
                     String body = buffer.toString();
@@ -341,7 +349,7 @@ public class HttpEndpointRuleHandler implements Handler<Long> {
                 }));
 
                 healthRequest.exceptionHandler(event -> {
-                    long endTime = System.currentTimeMillis();
+                    long endTime = currentTimeMillis();
 
                     EndpointStatus.StepBuilder stepBuilder = EndpointStatus.forStep(step.getName());
                     stepBuilder.fail(event.getMessage());
@@ -397,16 +405,53 @@ public class HttpEndpointRuleHandler implements Handler<Long> {
 
     private void report(final EndpointStatus endpointStatus) {
         final int previousStatusCode = rule.endpoint().getStatus().code();
+        final String previousStatusName = rule.endpoint().getStatus().name();
         this.endpointStatus.updateStatus(endpointStatus.isSuccess());
         endpointStatus.setState(rule.endpoint().getStatus().code());
         endpointStatus.setAvailable(!rule.endpoint().getStatus().isDown());
         endpointStatus.setResponseTime((long) endpointStatus.getSteps().stream().mapToLong(Step::getResponseTime).average().getAsDouble());
-        endpointStatus.setTransition(previousStatusCode != rule.endpoint().getStatus().code());
+        final boolean transition = previousStatusCode != rule.endpoint().getStatus().code();
+        endpointStatus.setTransition(transition);
+
+        if (transition && alertEngineService != null) {
+            final Event.Builder props = new Event.Builder()
+                    .id(UUID.toString(UUID.random()))
+                    .timestamp(currentTimeMillis())
+                    .context("Gateway", node.id())
+                    .context("Hostname", node.hostname())
+                    .context("Port", port)
+                    .type("HEALTH_CHECK")
+                    .prop("API", rule.api())
+                    .prop("Endpoint name", rule.endpoint().getName())
+                    .prop("Old status", previousStatusName)
+                    .prop("New status", rule.endpoint().getStatus().name())
+                    .prop("Success", endpointStatus.isSuccess());
+            if (gatewayConfiguration.tenant().isPresent()) {
+                props.context("tenant", gatewayConfiguration.tenant().get());
+            }
+            alertEngineService.send(props.build());
+        }
 
         statusHandler.handle(endpointStatus);
     }
 
     public void setStatusHandler(Handler<EndpointStatus> statusHandler) {
         this.statusHandler = statusHandler;
+    }
+
+    public void setAlertEngineService(AlertEngineService alertEngineService) {
+        this.alertEngineService = alertEngineService;
+    }
+
+    public void setGatewayConfiguration(GatewayConfiguration gatewayConfiguration) {
+        this.gatewayConfiguration = gatewayConfiguration;
+    }
+
+    public void setNode(Node node) {
+        this.node = node;
+    }
+
+    public void setPort(String port) {
+        this.port = port;
     }
 }

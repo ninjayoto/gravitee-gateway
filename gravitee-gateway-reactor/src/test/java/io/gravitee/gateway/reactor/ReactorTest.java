@@ -85,6 +85,11 @@ public class ReactorTest {
 
         when(handlerResolver.resolve(any(Request.class))).thenReturn(new AbstractReactorHandler() {
             @Override
+            public String contextPath() {
+                return "";
+            }
+
+            @Override
             public Reactable reactable() {
                 return new Reactable() {
                     @Override
